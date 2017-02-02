@@ -12,9 +12,30 @@ import (
 	"github.com/guillermo/go.procmeminfo"
 	"github.com/matishsiao/goInfo"
 
-	wire "github.com/adnaan/glowroot/org_glowroot_wire_api_model"
+	wire "myntapm/glowroot-go-agent/org_glowroot_wire_api_model"
+
 	"github.com/kr/pretty"
 )
+
+var (
+	conn          *grpc.ClientConn
+	host          string
+	agentID       string
+	agentRollupID string
+)
+
+type grpcClient struct {
+	conn          *grpc.ClientConn
+	host          string
+	agentID       string
+	agentRollupID string
+}
+
+func init() {
+	host = "0.0.0.0:8181"
+	agentID = "demo"
+	agentRollupID = "frog"
+}
 
 func getAgentConfig() *wire.AgentConfig {
 
@@ -89,10 +110,7 @@ func getEnvironment() *wire.Environment {
 	return env
 }
 
-func main() {
-
-	agentID := "echoservice-nmc-1"
-	agentRollupID := "echoservice"
+func getInitMessage() {
 
 	initMessage := &wire.InitMessage{
 		AgentId:       agentID,
@@ -101,10 +119,30 @@ func main() {
 		AgentConfig:   getAgentConfig(),
 	}
 
-	sc, err := newInsecureStreamClient("0.0.0.0:8181", initMessage)
+	var err error
+
+	conn, err = grpc.Dial(host, grpc.WithInsecure())
 	if err != nil {
+		log.Printf("failed to connect: %s", err)
 		return
 	}
+	collectorServiceClient := wire.NewCollectorServiceClient(conn)
+
+	initResponse, err := collectorServiceClient.CollectInit(context.Background(), initMessage)
+	if err != nil {
+		log.Println("Error", err, initResponse)
+		return
+	}
+
+	pretty.Println(initResponse)
+
+}
+
+func main() {
+
+	getInitMessage()
+
+	collectAggregateStream()
 
 	aggregate := &wire.Aggregate{}
 
@@ -123,7 +161,7 @@ func main() {
 		Message: &wire.AggregateStreamMessage_Header{Header: aggStreamHeader},
 	}
 
-	sc.send(messageHeader)
+	// stream.Send(messageHeader)
 
 	aggSharedQueryText := &wire.Aggregate_SharedQueryText{
 		FullText:      "",
@@ -137,7 +175,7 @@ func main() {
 		},
 	}
 
-	sc.send(msgSharedQueryText)
+	// stream.Send(msgSharedQueryText)
 
 	overAllAgg := &wire.OverallAggregate{
 		TransactionType: "Web",
@@ -150,7 +188,7 @@ func main() {
 		},
 	}
 
-	sc.send(msgTxOverallAgg)
+	// stream.Send(msgTxOverallAgg)
 
 	msgTxAgg := &wire.AggregateStreamMessage{
 		Message: &wire.AggregateStreamMessage_TransactionAggregate{
@@ -158,49 +196,31 @@ func main() {
 		},
 	}
 
-	sc.send(msgTxAgg)
-
-	sc.close()
+	// stream.Send(msgTxAgg)
 
 }
 
 type streamClient struct {
 	stream wire.CollectorService_CollectAggregateStreamClient
+	conn   *grpc.ClientConn
 }
 
-func newInsecureStreamClient(host string, initMessage *wire.InitMessage) (*streamClient, error) {
-
-	var sc *streamClient
-
-	conn, err := grpc.Dial(host, grpc.WithInsecure())
-	if err != nil {
-		log.Printf("failed to connect: %s", err)
-		return sc, err
-	}
-	defer conn.Close()
+func collectAggregateStream() (*wire.CollectorService_CollectAggregateStreamClient, error) {
 
 	collectorServiceClient := wire.NewCollectorServiceClient(conn)
 
-	initResponse, err := collectorServiceClient.CollectInit(context.Background(), initMessage)
+	stream, err := collectorServiceClient.CollectAggregateStream(context.Background())
 	if err != nil {
-		log.Println("Error", err, initResponse)
-		return sc, err
+		log.Println(err.Error())
+		return nil, err
 	}
 
-	pretty.Println(initResponse)
-
-	sc.stream, err = collectorServiceClient.CollectAggregateStream(context.Background())
-	if err != nil {
-		log.Println("Error", err, initResponse)
-		return sc, err
-	}
-
-	return sc, nil
+	return &stream, nil
 }
 
 func (s *streamClient) send(msg *wire.AggregateStreamMessage) error {
 	if err := s.stream.Send(msg); err != nil {
-		grpclog.Printf("%v.Send(%v) = %v", s.stream, msg, err)
+		grpclog.Printf("%v.Send(%v) = ERROR(%v)", s.stream, msg, err)
 		return err
 	}
 	return nil
@@ -214,4 +234,5 @@ func (s *streamClient) close() {
 	}
 
 	grpclog.Printf("Stream reply: %v", reply)
+	s.conn.Close()
 }
