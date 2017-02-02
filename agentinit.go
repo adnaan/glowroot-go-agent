@@ -3,236 +3,168 @@ package main
 import (
 	"context"
 	"log"
-	"os"
-	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/grpclog"
-
-	"github.com/guillermo/go.procmeminfo"
-	"github.com/matishsiao/goInfo"
 
 	wire "myntapm/glowroot-go-agent/org_glowroot_wire_api_model"
 
 	"github.com/kr/pretty"
 )
 
-var (
-	conn          *grpc.ClientConn
-	host          string
-	agentID       string
-	agentRollupID string
-)
-
-type grpcClient struct {
-	conn          *grpc.ClientConn
-	host          string
-	agentID       string
-	agentRollupID string
-}
-
-func init() {
-	host = "0.0.0.0:8181"
-	agentID = "demo"
-	agentRollupID = "frog"
-}
-
-func getAgentConfig() *wire.AgentConfig {
-
-	var gaugeConfig []*wire.AgentConfig_GaugeConfig
-	var alertConfig []*wire.AgentConfig_AlertConfig
-	var pluginConfig []*wire.AgentConfig_PluginConfig
-	var instrumentationConfig []*wire.AgentConfig_InstrumentationConfig
-
-	agentConfig := &wire.AgentConfig{
-		AgentVersion: "0.01",
-		TransactionConfig: &wire.AgentConfig_TransactionConfig{
-			SlowThresholdMillis:     &wire.OptionalInt32{Value: 2000},
-			ProfilingIntervalMillis: &wire.OptionalInt32{Value: 1000},
-			CaptureThreadStats:      true,
-		},
-		UiConfig: &wire.AgentConfig_UiConfig{
-			DefaultDisplayedPercentile:      []float64{50, 95, 99},
-			DefaultDisplayedTransactionType: "Web",
-		},
-		UserRecordingConfig: &wire.AgentConfig_UserRecordingConfig{
-			User: []string{},
-			ProfilingIntervalMillis: &wire.OptionalInt32{Value: 1000},
-		},
-		AdvancedConfig: &wire.AgentConfig_AdvancedConfig{
-			WeavingTimer:                          false,
-			ImmediatePartialStoreThresholdSeconds: &wire.OptionalInt32{Value: 60},
-			MaxAggregateQueriesPerType:            &wire.OptionalInt32{Value: 500},
-			MaxAggregateServiceCallsPerType:       &wire.OptionalInt32{Value: 500},
-			MaxAggregateTransactionsPerType:       &wire.OptionalInt32{Value: 500},
-			MaxStackTraceSamplesPerTransaction:    &wire.OptionalInt32{Value: 50000},
-			MaxTraceEntriesPerTransaction:         &wire.OptionalInt32{Value: 2000},
-			MbeanGaugeNotFoundDelaySeconds:        &wire.OptionalInt32{Value: 60},
-		},
-		GaugeConfig:           gaugeConfig,
-		AlertConfig:           alertConfig,
-		PluginConfig:          pluginConfig,
-		InstrumentationConfig: instrumentationConfig,
-	}
-
-	return agentConfig
-}
-
-func getTimeNowUnixNanoInt64() int64 {
-	return time.Now().UnixNano() / int64(time.Millisecond) / int64(time.Nanosecond)
-}
-
-func getEnvironment() *wire.Environment {
-
-	var env *wire.Environment
-
-	meminfo := &procmeminfo.MemInfo{}
-	meminfo.Update()
-
-	gi := goInfo.GetInfo()
-
-	hostInfo := &wire.HostInfo{
-		HostName:                 gi.Hostname,
-		AvailableProcessors:      int32(gi.CPUs),
-		TotalPhysicalMemoryBytes: &wire.OptionalInt64{Value: int64(meminfo.Total())},
-		OsName:    gi.OS,
-		OsVersion: gi.Core,
-	}
-	env = &wire.Environment{
-		HostInfo: hostInfo,
-		ProcessInfo: &wire.ProcessInfo{
-			ProcessId: &wire.OptionalInt64{Value: int64(os.Getpid())},
-			StartTime: getTimeNowUnixNanoInt64(),
-		},
-		JavaInfo: &wire.JavaInfo{},
-	}
-
-	return env
-}
-
-func getInitMessage() {
-
-	initMessage := &wire.InitMessage{
-		AgentId:       agentID,
-		AgentRollupId: agentRollupID,
-		Environment:   getEnvironment(),
-		AgentConfig:   getAgentConfig(),
-	}
-
-	var err error
-
-	conn, err = grpc.Dial(host, grpc.WithInsecure())
-	if err != nil {
-		log.Printf("failed to connect: %s", err)
-		return
-	}
-	collectorServiceClient := wire.NewCollectorServiceClient(conn)
-
-	initResponse, err := collectorServiceClient.CollectInit(context.Background(), initMessage)
-	if err != nil {
-		log.Println("Error", err, initResponse)
-		return
-	}
-
-	pretty.Println(initResponse)
-
+type GRPCClient struct {
+	conn            *grpc.ClientConn
+	host            string
+	agentID         string
+	agentRollupID   string
+	collectorClient wire.CollectorServiceClient
+	streamClient    wire.CollectorService_CollectAggregateStreamClient
 }
 
 func main() {
 
-	getInitMessage()
+	// initializing client struct
+	grpcClient, err := getGRPCClient()
+	if err != nil {
+		log.Println(err.Error())
+		return
+	}
+	// defer grpcClient.close()
 
-	collectAggregateStream()
+	initMessage, err := grpcClient.getInitMessage()
+	if err != nil {
+		log.Println("here:", err.Error())
+		return
+	}
+	pretty.Println(initMessage)
 
-	aggregate := &wire.Aggregate{}
+	grpcClient.collectAggregateStream()
+}
 
-	txAgg := &wire.TransactionAggregate{
-		TransactionType: "Web",
-		TransactionName: "/api/test1",
-		Aggregate:       aggregate,
+func (grpcClient *GRPCClient) getInitMessage() (*wire.InitResponse, error) {
+
+	initMessage := &wire.InitMessage{
+		AgentId:       grpcClient.agentID,
+		AgentRollupId: grpcClient.agentRollupID,
+		Environment:   getEnvironment(),
+		AgentConfig:   getAgentConfig(),
 	}
 
-	aggStreamHeader := &wire.AggregateStreamHeader{
-		AgentId:     agentID,
+	initResponse, err := grpcClient.collectorClient.CollectInit(context.Background(), initMessage)
+	if err != nil {
+		return nil, err
+	}
+
+	return initResponse, nil
+
+}
+
+func (grpcClient *GRPCClient) collectAggregateStream() {
+	// sending stream header
+	aggregateStreamHeader := &wire.AggregateStreamHeader{
+		AgentId:     grpcClient.agentID,
 		CaptureTime: getTimeNowUnixNanoInt64(),
 	}
-
-	messageHeader := &wire.AggregateStreamMessage{
-		Message: &wire.AggregateStreamMessage_Header{Header: aggStreamHeader},
+	aggregateStreamMessage := &wire.AggregateStreamMessage{
+		Message: &wire.AggregateStreamMessage_Header{Header: aggregateStreamHeader},
 	}
+	grpcClient.send(aggregateStreamMessage)
 
-	// stream.Send(messageHeader)
-
-	aggSharedQueryText := &wire.Aggregate_SharedQueryText{
+	// sending shared query text
+	aggregateSharedQueryText := &wire.Aggregate_SharedQueryText{
 		FullText:      "",
 		TruncatedText: "",
 		FullTextSha1:  "",
 	}
-
-	msgSharedQueryText := &wire.AggregateStreamMessage{
+	aggregateStreamMessage = &wire.AggregateStreamMessage{
 		Message: &wire.AggregateStreamMessage_SharedQueryText{
-			SharedQueryText: aggSharedQueryText,
+			SharedQueryText: aggregateSharedQueryText,
 		},
 	}
+	grpcClient.send(aggregateStreamMessage)
 
-	// stream.Send(msgSharedQueryText)
+	// dummy aggregate
+	aggregate := &wire.Aggregate{
+		ErrorCount:         2,
+		TransactionCount:   90,
+		TotalDurationNanos: 3000,
+	}
 
-	overAllAgg := &wire.OverallAggregate{
+	// transaction aggregate
+	transactionAggregate := &wire.TransactionAggregate{
+		TransactionType: "Web",
+		TransactionName: "/api/test1/test23",
+		Aggregate:       aggregate,
+	}
+	aggregateStreamMessage = &wire.AggregateStreamMessage{
+		Message: &wire.AggregateStreamMessage_TransactionAggregate{
+			TransactionAggregate: transactionAggregate,
+		},
+	}
+	grpcClient.send(aggregateStreamMessage)
+
+	// overall transaction aggregate
+	overallAggregate := &wire.OverallAggregate{
 		TransactionType: "Web",
 		Aggregate:       aggregate,
 	}
-
-	msgTxOverallAgg := &wire.AggregateStreamMessage{
+	aggregateStreamMessage = &wire.AggregateStreamMessage{
 		Message: &wire.AggregateStreamMessage_OverallAggregate{
-			OverallAggregate: overAllAgg,
+			OverallAggregate: overallAggregate,
 		},
 	}
-
-	// stream.Send(msgTxOverallAgg)
-
-	msgTxAgg := &wire.AggregateStreamMessage{
-		Message: &wire.AggregateStreamMessage_TransactionAggregate{
-			TransactionAggregate: txAgg,
-		},
-	}
-
-	// stream.Send(msgTxAgg)
-
 }
 
-type streamClient struct {
-	stream wire.CollectorService_CollectAggregateStreamClient
-	conn   *grpc.ClientConn
-}
-
-func collectAggregateStream() (*wire.CollectorService_CollectAggregateStreamClient, error) {
-
-	collectorServiceClient := wire.NewCollectorServiceClient(conn)
-
-	stream, err := collectorServiceClient.CollectAggregateStream(context.Background())
-	if err != nil {
-		log.Println(err.Error())
-		return nil, err
-	}
-
-	return &stream, nil
-}
-
-func (s *streamClient) send(msg *wire.AggregateStreamMessage) error {
-	if err := s.stream.Send(msg); err != nil {
-		grpclog.Printf("%v.Send(%v) = ERROR(%v)", s.stream, msg, err)
+func (grpcClient *GRPCClient) send(msg *wire.AggregateStreamMessage) error {
+	if err := grpcClient.streamClient.Send(msg); err != nil {
+		grpclog.Printf("%v.Send(%v) = ERROR(%v)", grpcClient.streamClient, msg, err)
 		return err
 	}
 	return nil
 }
 
-func (s *streamClient) close() {
+func (grpcClient *GRPCClient) close() {
 
-	reply, err := s.stream.CloseAndRecv()
+	reply, err := grpcClient.streamClient.CloseAndRecv()
 	if err != nil {
-		grpclog.Fatalf("%v.CloseAndRecv() got error %v, want %v", s.stream, err, nil)
+		grpclog.Fatalf("%v.CloseAndRecv() got error %v, want %v", grpcClient.streamClient, err, nil)
 	}
 
 	grpclog.Printf("Stream reply: %v", reply)
-	s.conn.Close()
+
+	err = grpcClient.conn.Close()
+	if err != nil {
+		grpclog.Fatalf("%v.CloseAndRecv() got error %v, want %v", grpcClient.streamClient, err, nil)
+	}
+
+}
+
+func getGRPCClient() (*GRPCClient, error) {
+
+	var err error
+
+	grpcClient := GRPCClient{
+		host:          "0.0.0.0:8181",
+		agentID:       "echoservice-nmc-1",
+		agentRollupID: "echoservice",
+	}
+
+	// establishing connection
+	grpcClient.conn, err = grpc.Dial(grpcClient.host, grpc.WithInsecure())
+	if err != nil {
+		log.Printf("failed to connect: %s", err)
+		return nil, err
+	}
+
+	// initializing collector client
+	grpcClient.collectorClient = wire.NewCollectorServiceClient(grpcClient.conn)
+
+	// initializing stream client
+	grpcClient.streamClient, err = grpcClient.collectorClient.CollectAggregateStream(context.Background())
+	if err != nil {
+		log.Println(err.Error())
+		return nil, err
+	}
+
+	return &grpcClient, nil
 }
