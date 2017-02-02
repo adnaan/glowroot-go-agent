@@ -29,7 +29,7 @@ func main() {
 		log.Println(err.Error())
 		return
 	}
-	// defer grpcClient.close()
+	defer grpcClient.close()
 
 	initMessage, err := grpcClient.getInitMessage()
 	if err != nil {
@@ -37,7 +37,6 @@ func main() {
 		return
 	}
 	pretty.Println(initMessage)
-
 	grpcClient.collectAggregateStream()
 }
 
@@ -65,6 +64,7 @@ func (grpcClient *GRPCClient) collectAggregateStream() {
 		AgentId:     grpcClient.agentID,
 		CaptureTime: getTimeNowUnixNanoInt64(),
 	}
+
 	aggregateStreamMessage := &wire.AggregateStreamMessage{
 		Message: &wire.AggregateStreamMessage_Header{Header: aggregateStreamHeader},
 	}
@@ -90,19 +90,6 @@ func (grpcClient *GRPCClient) collectAggregateStream() {
 		TotalDurationNanos: 3000,
 	}
 
-	// transaction aggregate
-	transactionAggregate := &wire.TransactionAggregate{
-		TransactionType: "Web",
-		TransactionName: "/api/test1/test23",
-		Aggregate:       aggregate,
-	}
-	aggregateStreamMessage = &wire.AggregateStreamMessage{
-		Message: &wire.AggregateStreamMessage_TransactionAggregate{
-			TransactionAggregate: transactionAggregate,
-		},
-	}
-	grpcClient.send(aggregateStreamMessage)
-
 	// overall transaction aggregate
 	overallAggregate := &wire.OverallAggregate{
 		TransactionType: "Web",
@@ -113,6 +100,22 @@ func (grpcClient *GRPCClient) collectAggregateStream() {
 			OverallAggregate: overallAggregate,
 		},
 	}
+
+	grpcClient.send(aggregateStreamMessage)
+
+	// transaction aggregate
+	transactionAggregate := &wire.TransactionAggregate{
+		TransactionType: "Web",
+		TransactionName: "/api/test1",
+		Aggregate:       aggregate,
+	}
+	aggregateStreamMessage = &wire.AggregateStreamMessage{
+		Message: &wire.AggregateStreamMessage_TransactionAggregate{
+			TransactionAggregate: transactionAggregate,
+		},
+	}
+	grpcClient.send(aggregateStreamMessage)
+
 }
 
 func (grpcClient *GRPCClient) send(msg *wire.AggregateStreamMessage) error {
