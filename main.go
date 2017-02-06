@@ -1,22 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"log"
+	"math/rand"
 	"time"
 
+	"github.com/adnaan/glowroot-go-agent/hdrhist"
+	wire "github.com/adnaan/glowroot-go-agent/org_glowroot_wire_api_model"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/grpclog"
-
-	wire "myntapm/glowroot-go-agent/org_glowroot_wire_api_model"
-
-	"math/rand"
-
-	"myntapm/glowroot-go-agent/hdrhist"
-
-	"bytes"
-
-	"fmt"
 )
 
 type GRPCClient struct {

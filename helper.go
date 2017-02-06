@@ -7,7 +7,7 @@ import (
 	procmeminfo "github.com/guillermo/go.procmeminfo"
 	"github.com/matishsiao/goInfo"
 
-	wire "myntapm/glowroot-go-agent/org_glowroot_wire_api_model"
+	wire "github.com/adnaan/glowroot-go-agent/org_glowroot_wire_api_model"
 )
 
 func getTimeNowUnixNanoInt64() int64 {
